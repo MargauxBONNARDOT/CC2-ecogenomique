@@ -1,0 +1,322 @@
+---
+title: "Projet CC2 paillomavirus"
+output: github_document
+---
+
+Margaux BONNARDOT
+M1 MFA
+
+# Problématique :
+
+  Lors d'analyses de microbiote, l'utilisation d'Operational Taxonomic Units(OTU) qui consite à un clustering des sequences qui ont plus de 97% de similarité a longtemps été la methode de regourpement la plus couragment utilisée. On utilise ce clustering en metabarrecoding pour regrouper les individus phylogénétiquement proches au seins du microbiote. Mais la notion d'espèce est difficile à qualifier en terme de pourcentage de similitude pour une certaine sequence. D'autres methodes on ainsi été developpées. 
+  On peut notamment citer DADA2 qui ne repose pas sur le regroupement par cluster basé sur la similarité. Cette méthode utilise des Amplicon sequencing variants (ASV). Cette méthode est basée sur une approche probabiliste et permet la détection et la correction des erreurs de séquençage et dépendant du jeu de données. Cela permet contrairement aux méthodes de novo et closed-ref de connaître l’abondance réelle car les erreurs de séquençage sont éliminées et on se retrouve avec seulement les séquences différentes d’un point de vue biologique.
+  
+
+  Nous souhaitons regarder l'impact au niveau de l'alpha et la beta diversité suivant la méthode utilisé. Pour cela nous utilisont les données de l'article "Depiction of Vaginal Microbiota in Women With High-Risk Human Papillomavirus Infection" qui utilise le clustering à 97% et regarder si une difference significative peut être observable au niveau des indices de Shannon, de Chao1 et d'Observed species ainsi que de principal coordinate.
+  Les données que nous analysons ici sont des séquences d'amplicons Illumina Miseq 2x250 et il s'agit du séquençage de la zone hypervariable V3-V4 de l'ARNr 16S. 
+  
+
+# Traitement des données :
+
+## Packages utilisées :
+
+```{r}
+library("knitr")
+library("BiocStyle")
+```
+
+```{r, cache=TRUE}
+.cran_packages <- c("ggplot2", "gridExtra", "devtools")
+
+.bioc_packages <- c("dada2", "phyloseq", "DECIPHER", "phangorn")
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+
+.cran_packages <- c( "shiny","miniUI", "caret", "pls", "e1071", "ggplot2", "randomForest", "dplyr", "ggrepel", "nlme", "devtools", "reshape2", "PMA", "structSSI", "ade4", "ggnetwork", "intergraph", "scales")
+.github_packages <- c("jfukuyama/phyloseqGraphTest")
+.bioc_packages <- c("genefilter", "impute")
+
+# Install CRAN packages (if not already installed)
+.inst <- .cran_packages %in% installed.packages()
+if (any(!.inst)){
+  install.packages(.cran_packages[!.inst],repos = "http://cran.rstudio.com/")
+}
+.inst <- .github_packages %in% installed.packages()
+if (any(!.inst)){
+  devtools::install_github(.github_packages[!.inst])
+}
+
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)){
+  source("http://bioconductor.org/biocLite.R")
+  biocLite(.bioc_packages[!.inst])
+}
+
+```
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(ade4)
+library(ggrepel)
+```
+
+## Traitement des données brutes 
+
+```{r}
+set.seed(120)
+miseq_path <- "/home/rstudio/HPVsegfastq" 
+list.files(miseq_path)
+```
+
+### Filter and Trim
+
+Je creer 2 objets qui vont contenir les données des fichiers fastq, les read 1 sont pour les forward et les read 2 pour les reverse.
+La fonction sort permet de classer par ordre alphabetique. On specifit le path vers fnFs et fnRs avec file.path. Pour verifier que la commande precedante à bien marché, on affiches les 3 premiers éléments de fnFsHPV et fnRsHPV. On obtient:
+
+*[1] "/home/rstudio/HPVsegfastq/SRR9611359_1.fastq.gz"*
+*[2] "/home/rstudio/HPVsegfastq/SRR9611360_1.fastq.gz"*
+*[3] "/home/rstudio/HPVsegfastq/SRR9611361_1.fastq.gz"*
+*[1] "/home/rstudio/HPVsegfastq/SRR9611359_2.fastq.gz"*
+*[2] "/home/rstudio/HPVsegfastq/SRR9611360_2.fastq.gz"*
+*[3] "/home/rstudio/HPVsegfastq/SRR9611361_2.fastq.gz"*
+
+```{r}
+fnFs <- sort(list.files(miseq_path_HPV, pattern="_1.fastq.gz")) 
+fnRs <- sort(list.files(miseq_path_HPV, pattern="_2.fastq.gz")) 
+
+sampleNames <- sapply(strsplit(fnFs, "_"), `[`, 1)
+
+
+fnFs <- file.path(miseq_path, fnFs)
+fnRs <- file.path(miseq_path, fnRs)
+
+fnFs[1:3]
+fnRs[1:3]
+```
+
+```{r}
+# Pour les fowards:
+plotQualityProfile(fnFs[1:2])
+
+# Pour les reverse:
+plotQualityProfile(fnRs[1:2])
+```
+
+Cette etape permet de regarder pour les 2 premiers echantillions la proportion des reads qui sont à un certain quality score pour une base donnée. On regarde donc ce qu'il faut trim, on considère qu'il faut avoir des reads avec un quality score de au moin 30.
+
+Pour trim mes sequences je trim la partie de droite à la longueur de 240 bp
+
+```{r, cache=TRUE}
+filt_path <- file.path(miseq_path, "filtered") 
+
+if(!file_test("-d", filt_path)) 
+  dir.create(filt_path)
+
+filtFs <- file.path(filt_path, paste0(sampleNames, "_F_filt.fasta.gz"))
+filtRs <- file.path(filt_path, paste0(sampleNames, "_R_filt.fastq.gz"))
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160), maxN=0, maxEE=c(2,2),truncQ=2, rm.phix=TRUE,compress=TRUE, multithread=TRUE)
+
+head(out)
+```
+
+#### Dereplication
+
+```{r}
+  derepFs <- derepFastq(filtFs, verbose=TRUE)
+  derepRs <- derepFastq(filtRs, verbose=TRUE)
+
+    names(derepFs) <- sampleNames
+  names(derepRs) <- sampleNames
+```
+
+```{r,cache=TRUE}
+  errF <- learnErrors(filtFs, multithread=TRUE) 
+```
+
+```{r}
+  errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+```{r}
+  plotErrors(errF)
+  plotErrors(errR)
+```
+
+Pooling improves the detection of rare variants
+```{r}
+  dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+  dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+```
+
+Inspecting the dada-class object returned by dada:
+```{r}  
+  dadaFs[[1]]  
+  dadaRs[[1]]  
+```
+
+### Construct sequence table and remove chimeras
+
+```{r}
+  mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs)
+
+  seqtabAll <- makeSequenceTable(mergers[!grepl("Mock", names(mergers))])
+  table(nchar(getSequences(seqtabAll)))
+
+  seqtabNoC <- removeBimeraDenovo(seqtabAll)
+  seqtabNoC
+```
+
+### Assign taxonomy
+
+```{r, cache=TRUE}
+  fastaRef <- "/home/rstudio/silva_nr99_v138.1_train_set.fa"
+  taxTab <- assignTaxonomy(seqtabNoC, refFasta = fastaRef, multithread=TRUE) 
+  unname(head(taxTab))
+```  
+  
+```{r}
+  taxTab
+```
+
+### Construct phylogenetic tree
+
+```{r, cache=TRUE}
+  seqs <- getSequences(seqtabNoC) 
+  names(seqs_HPV) <- seqs 
+  alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA,verbose=FALSE)
+```
+
+The phangorn R package is then used to construct a phylogenetic tree
+```{r}
+  phangAlign <- phyDat(as(alignment, "matrix"), type="DNA")
+  dm <- dist.ml(phangAlign)
+  treeNJ <- NJ(dm) # Note, tip order != sequence order
+  fit = pml(treeNJ, data=phangAlign)
+  fitGTR <- update(fit, k=4, inv=0.2)
+  fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+        rearrangement = "stochastic", control = pml.control(trace = 0))
+     detach("package:phangorn", unload=TRUE)
+```
+
+```{r}
+  fitGTR
+  plot(fitGTR)
+```
+
+### Combine data into a phyloseq object
+
+```{r}
+ps_connect <-url("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/ps.rds") 
+ps = readRDS(ps_connect)
+ps
+```
+
+```{r}
+  samdf <- read.csv("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/MIMARKS_Data_combined.csv",header=TRUE) 
+
+  samdf_HPV$SampleID <- paste0(gsub("00", "", samdf$host_subject_id), "D", samdf$age-21)
+  samdf <- samdf[!duplicated(samdf$SampleID),] # Remove duplicate entries for reverse reads
+  rownames(seqtabAll) <- gsub("124", "125", rownames(seqtabAll)) # Fix discrepancy
+  all(rownames(seqtabAll) %in% samdf$SampleID) # TRUE
+```
+
+```{r}
+  rownames(samdf) <- samdf$SampleID
+  keep.cols <- c("collection_date", "biome", "target_gene", "target_subfragment","host_common_name", "host_subject_id", "age", "sex", "body_product", "tot_mass", "diet", "family_relationship", "genotype", "SampleID") 
+  samdf <- samdf[rownames(seqtabAll), keep.cols]
+```
+
+```{r}
+ps <- phyloseq(otu_table(seqtabNoC, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxTab),phy_tree(fitGTR$tree))
+ps <- prune_samples(sample_names(ps) != "Mock", ps) # Remove mock sample
+ps
+```
+
+### Loading the data
+
+```{r}
+ps_connect <-url("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/ps.rds")
+ps = readRDS(ps_connect)
+ps
+```
+
+### Taxonomic filtering
+
+```{r}
+rank_names(ps)
+table(tax_table(ps)[, "Phylum"], exclude = NULL)
+```
+
+```{r}
+ps <- subset_taxa(ps, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
+```
+
+```{r}
+prevdf = apply(X = otu_table(ps),MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2),FUN = function(x){sum(x > 0)})
+# Add taxonomy and total read counts to this data.frame
+prevdf = data.frame(Prevalence = prevdf, TotalAbundance = taxa_sums(ps),tax_table(ps))
+```
+
+```{r}
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+```
+
+```{r}
+#?????
+```
+
+
+il faut que 'arrive au point ou ds le tuto on sait que pour chaque ech et donc 2 grp on sait combien d'espece on a et combien on a de chaque espece
+
+peut etre aller a ps3? ps3ra
+
+ps_samp ???
+
+s'arreter avnt prevalence filtering????
+
+## Diversité alpha
+
+Dans cette partie je dois calculer les especes observé et les 2 indices de l'alpha diversité: L'indice de Shannon qui permet de regarder la diverité des population du microbiote( il est inversement proportionel à la divesité) et l'indice de Chao 1 qui est un extimateur de richesse.
+
+J'ai vu qu'il ya. avait une extension R: vegan qui permettrait de calculer des indices d'alpha diversité.
+
+```{r}
+library(vegan)
+# Loading required package: permute
+# Loading required package: lattice
+
+help(diversity)
+```
+
+
+
+Dans l'article, 138 OTU ont été identifiées dans les deux groupes d'étude.
+
+
+s calculated with:
+ H <- diversity(BCI, index="shannon")
+ which finds diversity indices for all sites.
+Vegan does not have indices for evenness (equitability), but the most common of these, Pielou’s
+evenness J = H0/ log(S) is easily found as:
+ J <- H/log(specnumber(BCI))
+where specnumber is a simple vegan function to
+find the numbers of species.
+vegan also can estimate series
+
+Function specpool implements the following
+models to estimate the number of missing species
+f0.
+Function specnumber finds the number of species. With MARGIN = 2, it finds frequencies of species. 
+
+
+
+se servir de ca pour faire plot:
+
+
+plotBefore = plot_abundance(ps3,"")
+plotAfter = plot_abundance(ps3ra,"")
+# Combine each plot into one graphic.
+grid.arrange(nrow = 2,  plotBefore, plotAfter)
