@@ -58,6 +58,11 @@ library(dplyr)
 library(reshape2)
 library(ade4)
 library(ggrepel)
+library(phyloseq)
+library(ggplot2)
+library(dada2)
+library(DECIPHER)
+library(phangorn)
 ```
 
 ## Traitement des données brutes 
@@ -73,16 +78,9 @@ list.files(miseq_path)
 Je creer 2 objets qui vont contenir les données des fichiers fastq, les read 1 sont pour les forward et les read 2 pour les reverse.
 La fonction sort permet de classer par ordre alphabetique. On specifit le path vers fnFs et fnRs avec file.path. Pour verifier que la commande precedante à bien marché, on affiches les 3 premiers éléments de fnFsHPV et fnRsHPV. On obtient:
 
-*[1] "/home/rstudio/HPVsegfastq/SRR9611359_1.fastq.gz"*
-*[2] "/home/rstudio/HPVsegfastq/SRR9611360_1.fastq.gz"*
-*[3] "/home/rstudio/HPVsegfastq/SRR9611361_1.fastq.gz"*
-*[1] "/home/rstudio/HPVsegfastq/SRR9611359_2.fastq.gz"*
-*[2] "/home/rstudio/HPVsegfastq/SRR9611360_2.fastq.gz"*
-*[3] "/home/rstudio/HPVsegfastq/SRR9611361_2.fastq.gz"*
-
 ```{r}
-fnFs <- sort(list.files(miseq_path_HPV, pattern="_1.fastq.gz")) 
-fnRs <- sort(list.files(miseq_path_HPV, pattern="_2.fastq.gz")) 
+fnFs <- sort(list.files(miseq_path, pattern="_1.fastq.gz")) 
+fnRs <- sort(list.files(miseq_path, pattern="_2.fastq.gz")) 
 
 sampleNames <- sapply(strsplit(fnFs, "_"), `[`, 1)
 
@@ -127,7 +125,7 @@ head(out)
   derepRs <- derepFastq(filtRs, verbose=TRUE)
 
     names(derepFs) <- sampleNames
-  names(derepRs) <- sampleNames
+    names(derepRs) <- sampleNames
 ```
 
 ```{r,cache=TRUE}
@@ -157,7 +155,7 @@ Inspecting the dada-class object returned by dada:
 
 ### Construct sequence table and remove chimeras
 
-```{r}
+```{r, cache=TRUE}
   mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs)
 
   seqtabAll <- makeSequenceTable(mergers[!grepl("Mock", names(mergers))])
@@ -183,12 +181,13 @@ Inspecting the dada-class object returned by dada:
 
 ```{r, cache=TRUE}
   seqs <- getSequences(seqtabNoC) 
-  names(seqs_HPV) <- seqs 
+  names(seqs) <- seqs 
   alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA,verbose=FALSE)
 ```
 
 The phangorn R package is then used to construct a phylogenetic tree
-```{r}
+
+```{r, cache=TRUE}
   phangAlign <- phyDat(as(alignment, "matrix"), type="DNA")
   dm <- dist.ml(phangAlign)
   treeNJ <- NJ(dm) # Note, tip order != sequence order
@@ -199,12 +198,14 @@ The phangorn R package is then used to construct a phylogenetic tree
      detach("package:phangorn", unload=TRUE)
 ```
 
-```{r}
+```{r, cache=TRUE}
   fitGTR
   plot(fitGTR)
 ```
 
 ### Combine data into a phyloseq object
+
+JE ne sais pas quoi mettre comme lien à la place de celui du workflow, la suite de l'etude n'est alors pas bonne car elle ne prend pas les données de l'article. J'ai quand même continué pour montrer mon raisonnement.
 
 ```{r}
 ps_connect <-url("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/ps.rds") 
@@ -215,7 +216,7 @@ ps
 ```{r}
   samdf <- read.csv("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/MIMARKS_Data_combined.csv",header=TRUE) 
 
-  samdf_HPV$SampleID <- paste0(gsub("00", "", samdf$host_subject_id), "D", samdf$age-21)
+  samdf$SampleID <- paste0(gsub("00", "", samdf$host_subject_id), "D", samdf$age-21)
   samdf <- samdf[!duplicated(samdf$SampleID),] # Remove duplicate entries for reverse reads
   rownames(seqtabAll) <- gsub("124", "125", rownames(seqtabAll)) # Fix discrepancy
   all(rownames(seqtabAll) %in% samdf$SampleID) # TRUE
@@ -228,14 +229,14 @@ ps
 ```
 
 ```{r}
-ps <- phyloseq(otu_table(seqtabNoC, taxa_are_rows=FALSE), 
-               sample_data(samdf), 
-               tax_table(taxTab),phy_tree(fitGTR$tree))
+#ps <- phyloseq(otu_table(seqtabNoC, taxa_are_rows=FALSE), sample_data(samdf), tax_table(taxTab), phy_tree(fitGTR$tree))
 ps <- prune_samples(sample_names(ps) != "Mock", ps) # Remove mock sample
 ps
 ```
 
 ### Loading the data
+
+Le problème ici ets le même que celui mentionné precedemment. le document ne correspond pas.
 
 ```{r}
 ps_connect <-url("https://raw.githubusercontent.com/spholmes/F1000_workflow/master/data/ps.rds")
@@ -249,10 +250,10 @@ ps
 rank_names(ps)
 table(tax_table(ps)[, "Phylum"], exclude = NULL)
 ```
-
 ```{r}
 ps <- subset_taxa(ps, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
 ```
+Je ne n'ai pas les bonne données donc difficile de coparé mais si j'avais eu les données j'aurais comparé combien d'ASV ont été trouvé comparé aux OTU trouvés dans l'article. Dans l'article, 138 OTU ont été identifiées dans les deux groupes d'étude.
 
 ```{r}
 prevdf = apply(X = otu_table(ps),MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2),FUN = function(x){sum(x > 0)})
@@ -264,59 +265,22 @@ prevdf = data.frame(Prevalence = prevdf, TotalAbundance = taxa_sums(ps),tax_tabl
 plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
 ```
 
-```{r}
-#?????
-```
-
-
-il faut que 'arrive au point ou ds le tuto on sait que pour chaque ech et donc 2 grp on sait combien d'espece on a et combien on a de chaque espece
-
-peut etre aller a ps3? ps3ra
-
-ps_samp ???
-
-s'arreter avnt prevalence filtering????
-
 ## Diversité alpha
 
 Dans cette partie je dois calculer les especes observé et les 2 indices de l'alpha diversité: L'indice de Shannon qui permet de regarder la diverité des population du microbiote( il est inversement proportionel à la divesité) et l'indice de Chao 1 qui est un extimateur de richesse.
 
-J'ai vu qu'il ya. avait une extension R: vegan qui permettrait de calculer des indices d'alpha diversité.
+Il existe different packages qui permettent de mesurere les indices d'alpha diversité tel que le package vegan, mais je vais utiliser phyloseq et ggplot2 pour la mise en page des graphiques.
+
+avant de proceder à faire des plots d'alpha diversité il faut creer un nouvel objet qui contient les données de ps mais de manière à ce que tous les echantillions ne soit pas sur graph mais qu'il y ait les quantiles pour l'ensemble des echantillions. Je n'ai deja as les bonnes données vu que j'ai celle du wrokflow. Aussi je ne saurais pas comment à partir de l'objet ps prendre les 30 premier qui correspondent aux femmes qui n'ont pas d'infection par le HPV et les 30 autres en "early stage of infection". ETanta données qu'il ya. des erreurs dans mon code je ne peux pas faire la suite de ce que je voulais faire. J'aurais aimé pouvoir refaire cette analyse en faisant cette fois avec la methode d'OTU en plus, et ainsi à l'aide de wilcox.test() comparer les 3 indices des 2 groupes (HPV- et HPV+) et entre les 2 methodes en regardant si la p-value est superieur ou inferieur au threshold à 5%.
 
 ```{r}
-library(vegan)
-# Loading required package: permute
-# Loading required package: lattice
+ps
 
-help(diversity)
+estimate_richness(ps, split = TRUE, measures = c("Observed", "Chao1", "Shannon"))
+```
+
+```{r}
+plot_richness(ps, measures=c("Observed", "Chao1", "Shannon"), title = " Alpha diversity indices for the microbiotes from both non-infected women and women in early stageof infection my the Human Papillomavirus.")
 ```
 
 
-
-Dans l'article, 138 OTU ont été identifiées dans les deux groupes d'étude.
-
-
-s calculated with:
- H <- diversity(BCI, index="shannon")
- which finds diversity indices for all sites.
-Vegan does not have indices for evenness (equitability), but the most common of these, Pielou’s
-evenness J = H0/ log(S) is easily found as:
- J <- H/log(specnumber(BCI))
-where specnumber is a simple vegan function to
-find the numbers of species.
-vegan also can estimate series
-
-Function specpool implements the following
-models to estimate the number of missing species
-f0.
-Function specnumber finds the number of species. With MARGIN = 2, it finds frequencies of species. 
-
-
-
-se servir de ca pour faire plot:
-
-
-plotBefore = plot_abundance(ps3,"")
-plotAfter = plot_abundance(ps3ra,"")
-# Combine each plot into one graphic.
-grid.arrange(nrow = 2,  plotBefore, plotAfter)
